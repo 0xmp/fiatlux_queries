@@ -1,0 +1,9 @@
+CREATE OR REPLACE VIEW dune_user_generated.fiat_minted AS
+
+SELECT "user"
+    , amount / 1e18 as amount
+    , contract_address
+    , evt_tx_hash
+    , evt_block_time 
+FROM fiat_dao."Moneta_evt_Exit"
+ORDER BY evt_block_time desc
