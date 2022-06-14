@@ -1,0 +1,33 @@
+with days as (
+SELECT date_trunc ('DAY', cast ( generate_series('2022-01-01'::TIMESTAMP, now()::timestamp, '1 day') as date ) ) AS day -- Generate all days since the start of 2022
+),
+
+temp as (
+SELECT
+    day
+    , (SELECT SUM(CASE WHEN action = 'Mint' THEN fiat_amount END) FROM dune_user_generated.fiat_all_transactions WHERE evt_block_time <= day) as amount_minted
+    , (SELECT SUM(CASE WHEN action = 'Burn' THEN -fiat_amount END) FROM dune_user_generated.fiat_all_transactions WHERE evt_block_time <= day) as amount_burned
+    , (SELECT COUNT(*) FROM (SELECT DISTINCT address FROM dune_user_generated.fiat_all_transactions as t where t.evt_block_time <= day) as t2) as unique_users
+    , (SELECT SUM(fees_paid) FROM dune_user_generated.fiat_all_transactions WHERE evt_block_time <= day) as running_fees_paid
+    , (SELECT SUM(remaining_fees_table.remaining_fees) FROM 
+        (
+            SELECT DISTINCT ON (address, collat_name) 
+                all_txs.*
+                , publican_latest_rates.output_rate / 1e18 as publican_latest_rate
+                , CASE WHEN ABS(running_normal_debt_per_vault) > 1e-3 THEN running_normal_debt_per_vault * (publican_latest_rates.output_rate / 1e18 - avg_rate) END as remaining_fees
+            FROM dune_user_generated.fiat_all_transactions as all_txs
+            left join dune_user_generated.fiat_collaterals_list as collats
+            on collats.asset = all_txs.collat_name
+            left join (SELECT DISTINCT ON (vault) vault, output_rate FROM fiat_dao."Publican_call_collect" WHERE call_block_time <= day order by vault, call_block_time desc) as publican_latest_rates
+            on publican_latest_rates.vault = collats.vault_address
+            WHERE collat_name <> '' AND evt_block_time <= day
+            ORDER BY address, collat_name, evt_block_time desc
+        ) as remaining_fees_table
+    ) as running_remaining_fees 
+FROM days
+)
+
+SELECT *
+    , running_fees_paid + running_remaining_fees as generated_fees
+FROM temp
+ORDER BY day desc
