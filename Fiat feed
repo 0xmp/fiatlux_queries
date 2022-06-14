@@ -1,0 +1,12 @@
+SELECT 
+    evt_block_time
+    , substring(address, 0, 4) as wallet
+    , action
+    , fiat_amount
+    , collat_amount
+    , collat_issuer
+    , collat_name
+    , fees_paid
+    , CONCAT('<a href="https://etherscan.io/tx/', replace(evt_tx_hash::text, '\', '0'),'" target="_blank" > Link </a>') as "transaction"
+FROM dune_user_generated.fiat_all_transactions
+ORDER BY evt_block_time desc
