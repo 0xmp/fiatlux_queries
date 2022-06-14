@@ -1,0 +1,143 @@
+WITH market_time_series AS (
+    SELECT markets.id as market_id, minute
+    FROM (
+        SELECT generate_series('2022-01-08 00:00', now(), '1 minute'::interval) as minute
+    ) AS t
+    JOIN dune_user_generated.ohm_inverse_bond_markets as markets
+        ON TRUE
+    LEFT JOIN olympus_v2."OlympusProV2_evt_CloseMarket" as market_closed
+        ON market_closed.id = markets.id
+    WHERE minute <= COALESCE(market_closed.evt_block_time, markets.conclusion_date)
+        AND minute >= date_trunc('minute', markets.market_create_time)
+)
+
+, minute_series AS (
+    SELECT generate_series(t.start_date, now(), '1 minute'::interval) as minute
+    FROM (
+        SELECT MIN(minute) as start_date
+        FROM market_time_series
+    ) as t
+)
+
+, swap AS ( SELECT
+            date_trunc('minute', sw."evt_block_time") as minute,
+            ("amount0In" + "amount0Out")/1e9 AS a0_amt, 
+            ("amount1In" + "amount1Out")/1e18 AS a1_amt
+            
+        FROM sushi."Pair_evt_Swap" sw
+        WHERE evt_block_time >= (SELECT MIN(minute) FROM market_time_series)
+            AND contract_address = '\x055475920a8c93cffb64d039a8205f7acc7722d3' 
+            )
+            
+, price as (
+    select  swap."minute"
+        ,   AVG((a1_amt/a0_amt)) as price
+    from swap
+    GROUP BY 1
+)
+
+, prices_per_minute as (
+    SELECT series.minute 
+        , COALESCE(present_minute.price, past_minute.price) as price
+    FROM minute_series as series
+    LEFT JOIN price as present_minute
+        ON present_minute.minute = series.minute
+    LEFT JOIN LATERAL(
+        SELECT past_minute.price
+        FROM price AS past_minute
+        WHERE past_minute.minute < series.minute
+            AND present_minute IS NULL
+            AND past_minute.price IS NOT NULL
+        ORDER BY past_minute.minute DESC
+        FETCH FIRST 1 ROW ONLY
+    ) AS past_minute
+        ON TRUE
+)
+
+, sync AS (
+SELECT
+            date_trunc('minute', sw."evt_block_time") as minute,
+            reserve0/1e9 AS ohm_in_pool, 
+            reserve1/1e18 AS dai_in_pool
+        FROM sushi."Pair_evt_Sync" sw
+        WHERE evt_block_time >= (SELECT MIN(minute) FROM market_time_series)
+            AND contract_address = '\x055475920a8c93cffb64d039a8205f7acc7722d3' 
+            )
+            
+, pool_state as (
+    select  "minute"
+        ,   AVG((ohm_in_pool * dai_in_pool)) as k_pool
+        ,   AVG(dai_in_pool) as dai_in_pool
+        ,   AVG(ohm_in_pool) as ohm_in_pool
+    from sync
+    GROUP BY 1
+)
+
+, pool_state_per_minute as (
+    SELECT series.minute 
+        , COALESCE(present_minute.k_pool, past_minute.k_pool) as k_pool
+        , COALESCE(present_minute.dai_in_pool, past_minute.dai_in_pool) as dai_in_pool
+        , COALESCE(present_minute.ohm_in_pool, past_minute.ohm_in_pool) as ohm_in_pool
+    FROM minute_series as series
+    LEFT JOIN pool_state as present_minute
+        ON present_minute.minute = series.minute
+    LEFT JOIN LATERAL(
+        SELECT past_minute.k_pool, past_minute.dai_in_pool, past_minute.ohm_in_pool
+        FROM pool_state AS past_minute
+        WHERE past_minute.minute < series.minute
+            AND present_minute IS NULL
+            AND past_minute.k_pool IS NOT NULL
+        ORDER BY past_minute.minute DESC
+        FETCH FIRST 1 ROW ONLY
+    ) AS past_minute
+        ON TRUE
+)
+
+, bond_market_deposits AS (
+SELECT  date_trunc('minute', deposits.block_time) AS minute
+    ,   market_id
+    ,   tokens.name as token_name
+    ,   (token_prices.price/deposits.bond_price) * (10 ^ tokens.decimals) AS bond_price_usd
+    ,   token_prices.price * deposits.payout_token_qty AS payout_usd
+    ,   ohm_prices.price as ohm_price
+    ,   deposits.bonded_ohm_qty AS bonded_ohm
+    ,   deposits.payout_token_qty
+    ,   deposits.evt_tx_hash
+    ,   k_pool
+    ,   dai_in_pool
+    -- Assuming the person had switched from dai to ohm using our ohm-dai pool, slippage she would have incurred
+    ,   k_pool / (ohm_in_pool - bonded_ohm_qty) - dai_in_pool - bonded_ohm_qty * (k_pool / (ohm_in_pool - bonded_ohm_qty) ^ 2) as slippage_usd 
+    ,   transaction.gas_price * 1e-18 * transaction.gas_used * eth_prices.price as gas_fee_usd
+FROM dune_user_generated.ohm_inverse_bond_deposits AS deposits
+JOIN dune_user_generated.ohm_inverse_bond_markets AS markets
+    ON markets.id = deposits.market_id
+JOIN dune_user_generated.ohm_bond_tokens AS tokens
+    ON tokens.address = markets.base_token
+LEFT JOIN prices_per_minute as ohm_prices 
+    ON ohm_prices.minute = date_trunc('minute', deposits.block_time) 
+LEFT JOIN pool_state_per_minute as pool_state 
+    ON pool_state.minute = date_trunc('minute', deposits.block_time) 
+LEFT JOIN prices.usd as token_prices 
+    ON token_prices.minute = date_trunc('minute', deposits.block_time) 
+    AND token_prices.contract_address = markets.base_token
+LEFT JOIN prices.usd as eth_prices 
+    on eth_prices.minute = date_trunc('minute', deposits.block_time) 
+    AND eth_prices.contract_address = '\xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' -- Getting wETH price to compute gas fee price
+LEFT JOIN ethereum."transactions" as transaction
+    ON transaction.hash = deposits.evt_tx_hash
+)
+
+SELECT  minute
+    ,   token_name as bond
+    ,   payout_usd
+    ,   payout_token_qty
+    ,   bonded_ohm as purchased_ohm
+    ,   cast((bonded_ohm * ohm_price) as double precision) as purchased_ohm_usd
+    ,   (payout_usd - bonded_ohm * ohm_price) / (bonded_ohm * ohm_price) as raw_roi
+    ,   replace(evt_tx_hash::text, '\', '0') as tx_hash
+    ,   market_id
+    ,   slippage_usd
+    ,   gas_fee_usd
+    ,   (payout_usd - 2 * gas_fee_usd - bonded_ohm * ohm_price / (1 - 0.003) + slippage_usd) / (bonded_ohm * ohm_price / (1 - 0.003) + 2 * gas_fee_usd - slippage_usd) as roi_assuming_recycling
+FROM bond_market_deposits
+ORDER BY 1;
