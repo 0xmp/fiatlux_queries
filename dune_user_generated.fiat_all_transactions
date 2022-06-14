@@ -1,0 +1,55 @@
+--DROP VIEW dune_user_generated.fiat_all_transactions CASCADE;
+CREATE OR REPLACE VIEW dune_user_generated.fiat_all_transactions AS
+
+-- Each time someone burns FIAT, we look at how much was burn and at what rate compared to the rate it was borrowed at to compute fees paid.
+WITH mints_and_burns_with_rates_and_fees as (
+SELECT evt_block_time
+    , address
+    , evt_tx_hash
+    , action
+    , fiat_amount
+    , collat_amount
+    , normalDebt_amount
+    , collat_issuer
+    , collat_name
+    , collat_maturity
+    , rate
+    , running_normal_debt_per_vault
+    , avg_rate
+    , CASE WHEN action = 'Burn' THEN -normalDebt_amount * (rate - (SELECT avg_rate FROM dune_user_generated.fiat_mints_and_burns_with_avg_rates as t WHERE t.address = t2.address AND t.collat_name = t2.collat_name AND t.evt_block_time < t2.evt_block_time ORDER BY evt_block_time desc LIMIT 1)) END as fees_paid
+FROM dune_user_generated.fiat_mints_and_burns_with_avg_rates as t2
+ORDER BY evt_block_time desc
+),
+
+named_fiat_transfers as (
+select DISTINCT ON (all_transfers.evt_tx_hash)
+    evt_block_time
+    , "from" as address
+    , evt_tx_hash
+    , case
+        when evt_tx_hash in (SELECT evt_tx_hash FROM curvefi."fiat3crv_evt_AddLiquidity") then 'Curve add LP'
+        when evt_tx_hash in (SELECT evt_tx_hash FROM curvefi."fiat3crv_evt_RemoveLiquidity") then 'Curve remove LP'
+        when evt_tx_hash in (SELECT evt_tx_hash FROM curvefi."fiat3crv_evt_RemoveLiquidityOne") then 'Curve remove LP'
+        when evt_tx_hash in (SELECT evt_tx_hash FROM curvefi."fiat3crv_evt_TokenExchangeUnderlying") then 'Curve swap'
+        else 'Other' end as action
+        , (value / 1e18 ) as fiat_amount
+FROM erc20."ERC20_evt_Transfer" as all_transfers
+WHERE all_transfers.contract_address = '\x586Aa273F262909EEF8fA02d90Ab65F5015e0516' --FIAT contract
+    AND evt_tx_hash NOT IN (SELECT evt_tx_hash FROM mints_and_burns_with_rates_and_fees)
+)
+
+SELECT * 
+FROM mints_and_burns_with_rates_and_fees
+UNION 
+SELECT *
+    , NULL as collat_amount
+    , NULL as normalDebt_amount
+    , NULL as collat_issuer
+    , NULL as collat_name
+    , NULL as collat_maturity
+    , NULL as rate
+    , NULL as running_normal_debt_per_vault
+    , NULL as avg_rate
+    , NULL as fees_paid
+FROM named_fiat_transfers
+order by evt_block_time desc
