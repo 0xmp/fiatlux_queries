@@ -1,0 +1,44 @@
+CREATE OR REPLACE VIEW dune_user_generated.fiat_mints_and_burns_without_avg_rates as 
+
+with mints_and_burns as (
+    SELECT 
+        codex_modif.evt_block_time
+        , "from" as address
+        , codex_modif."evt_tx_hash" as evt_tx_hash
+        , CASE
+            WHEN "deltaNormalDebt" > 0 THEN 'Mint'
+            WHEN "deltaNormalDebt" < 0 THEN 'Burn'
+            WHEN "deltaCollateral" > 0 THEN 'Add collateral'
+            WHEN "deltaCollateral" < 0 THEN 'Remove collateral'
+        ELSE 'Unknown' END as action
+        , CASE 
+            WHEN "deltaNormalDebt" > 0 THEN fiat_mints.amount / 1e18
+            WHEN "deltaNormalDebt" < 0 THEN -fiat_burns.amount / 1e18
+            ELSE 0 
+        END as fiat_amount
+        , "deltaCollateral" / 1e18 as collat_amount
+        , "deltaNormalDebt" / 1e18 as normalDebt_amount
+        , issuer as collat_issuer
+        , asset as collat_name
+        , maturity as collat_maturity
+    FROM fiat_dao."Codex_evt_ModifyCollateralAndDebt" as codex_modif
+    JOIN 
+    ethereum."transactions" as all_eth_txs
+    ON all_eth_txs.hash = codex_modif.evt_tx_hash
+    LEFT JOIN dune_user_generated.fiat_collaterals_list as fiat_collaterals_list
+        ON fiat_collaterals_list.vault_address = vault AND 
+            fiat_collaterals_list.tokenid = codex_modif."tokenId"
+    LEFT JOIN fiat_dao."Moneta_evt_Exit" as fiat_mints 
+    on fiat_mints.evt_tx_hash = codex_modif.evt_tx_hash
+    LEFT JOIN fiat_dao."Moneta_evt_Enter" as fiat_burns 
+    on fiat_burns.evt_tx_hash = codex_modif.evt_tx_hash
+)
+
+SELECT *
+    , CASE 
+        WHEN normalDebt_amount <> 0 then fiat_amount / normalDebt_amount
+        ELSE NULL
+    END as rate
+    , SUM(normalDebt_amount) OVER(PARTITION BY address, collat_name order by evt_block_time) as running_normal_debt_per_vault 
+    , ROW_NUMBER() OVER (PARTITION BY address, collat_name order by evt_block_time) as row
+FROM mints_and_burns
