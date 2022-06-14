@@ -1,0 +1,17 @@
+CREATE OR REPLACE VIEW dune_user_generated.fiat_mints_and_burns_with_avg_rates as 
+
+WITH RECURSIVE CTE AS (
+    SELECT * 
+    , COALESCE(rate, 0) as avg_rate
+    FROM dune_user_generated.fiat_mints_and_burns_without_avg_rates
+    WHERE row = 1
+    UNION 
+    SELECT with_rate.*
+        , CASE WHEN with_rate.action = 'Mint' THEN COALESCE((with_rate.rate * with_rate.normalDebt_amount + CTE.avg_rate * CTE.running_normal_debt_per_vault) / with_rate.running_normal_debt_per_vault, CTE.avg_rate) ELSE CTE.avg_rate END as avg_rate
+    FROM CTE
+    LEFT JOIN dune_user_generated.fiat_mints_and_burns_without_avg_rates as with_rate
+    ON with_rate.address = CTE.address AND with_rate.collat_name = CTE.collat_name AND with_rate.row = CTE.row + 1
+    WHERE with_rate.row > 1
+)
+
+SELECT * FROM CTE
