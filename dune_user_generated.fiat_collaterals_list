@@ -1,0 +1,48 @@
+--DROP VIEW dune_user_generated.fiat_collaterals_list CASCADE;
+
+CREATE OR REPLACE VIEW dune_user_generated.fiat_collaterals_list AS
+
+with all_vaults as (
+    select cast('\x52c9886d5d87b0f06ebacbeff750b5ffad5d17d9' as bytea) as contract_address
+    , cast('\xd9080BAC070cf47CBDb7223D2440cF8E978e6b45' as bytea) as vault_address
+    , cast(0 as numeric) as tokenId
+    , cast('Element Principal Token yvUSDC-29APR22' as varchar(150)) as asset
+    , cast('Element' as varchar(100)) as issuer
+    , cast('USDC' as varchar(10)) as stablecoin
+    , cast('2022-04-29 00:00' as date) as maturity
+    , cast(1e6 as numeric) as decimals
+    union
+    select '\x2c72692E94E757679289aC85d3556b2c0f717E0E', '\xea016f6a5eaac396baa3aa712e8d3f20764cbb1f', '0', 'Element Principal Token yvDAI-29APR22' as asset, 'Element' as issuer, 'DAI' as stablecoin, '2022-04-29 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x0740A6CfB9468B8b53070C0B327099293DCCB82d', '\x222dEE6192f946040f97aAdb386FAfa4e6310Cdc', '0', 'Element Principal Token yvCurveLUSD-29APR22' as asset, 'Element' as issuer, 'LUSD' as stablecoin, '2022-04-29 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x83d392a7be901892a8c861c96Ea430B8d9c2BD51', '\xE486a875367875a7Ec1DfE40510B6Ed217849737', '0', 'Element Principal Token yvCurve-LUSD-16SEP22' as asset, 'Element' as issuer, 'LUSD' as stablecoin, '2022-09-16 00:00' as maturity, 1e18 as decimals
+    union
+    select '\xCFe60a1535ecc5B0bc628dC97111C8bb01637911', '\x4465476275E1201F2E5Ab9479E6a51c7875Ce700', '0', 'Element Principal Token yvUSDC-16SEP22' as asset, 'Element' as issuer, 'USDC' as stablecoin, '2022-09-16 00:00' as maturity, 1e6 as decimals
+    union
+    select '\xCCE00da653eB50133455D4075fE8BcA36750492c', '\xb6922A39C85a4E838e1499A8B7465BDca2E49491', '0', 'Element Principal Token yvDAI-16SEP22' as asset, 'Element' as issuer, 'DAI' as stablecoin, '2022-09-16 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\x542263087f42808d8763f55d41ebb45070671c2a', '844848939859969', 'Notional fUSDC Jun 27 2022' as asset, 'Notional' as issuer, 'USDC' as stablecoin, '2022-06-27 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\x7e07b849217b18e77c0965944a0b816425b135fe', '844854911827969', 'Notional fUSDC Mar 24 2023' as asset, 'Notional' as issuer, 'USDC' as stablecoin, '2023-03-24 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\xab7b8654c68a17892f7db8b6e3e66fca86965d06', '844850930515969', 'Notional fUSDC Sep 25 2022' as asset, 'Notional' as issuer, 'USDC' as stablecoin, '2022-09-25 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\x61d677f13375afae237a20c3f47843ff982339fe', '563373963149313', 'Notional fDAI Jun 27 2022' as asset, 'Notional' as issuer, 'DAI' as stablecoin, '2022-06-27 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\x27fb9c8dde4fe79b687304d9971032a181c7f3a0', '563375953805313', 'Notional fDAI Sep 25 2022' as asset, 'Notional' as issuer, 'DAI' as stablecoin, '2022-09-25 00:00' as maturity, 1e18 as decimals
+    union
+    select '\x6bf5eb06201e4ea7c315b1c23bfe79fae30541f9', '\x87cbb9967f4c38c2b1a7b6596e8cab26af7e8d83', '563379935117313', 'Notional fDAI Mar 24 2023' as asset, 'Notional' as issuer, 'DAI' as stablecoin, '2023-03-24 00:00' as maturity, 1e18 as decimals
+    )
+    
+SELECT all_vaults.*
+    , latest_publican_rates.output_rate / 1e18 as latest_publican_borrow_rate
+    , latest_collybus_price.output_price / 1e18 * (ratio / 1e18) as latest_collybus_collat_price 
+    , CASE WHEN maturity > NOW() THEN EXTRACT(epoch from age(maturity, now()))::int ELSE 0 END as seconds_to_maturity
+FROM all_vaults
+LEFT JOIN (SELECT DISTINCT ON (vault) vault, output_rate FROM fiat_dao."Publican_call_collect" order by vault, call_block_time desc) as latest_publican_rates
+ON latest_publican_rates.vault = all_vaults.vault_address
+LEFT JOIN (SELECT DISTINCT ON (vault) vault, output_price FROM fiat_dao."Collybus_call_read" order by vault, call_block_time desc) as latest_collybus_price
+on latest_collybus_price.vault = all_vaults.vault_address
+LEFT JOIN (SELECT DISTINCT ON (vault) vault, data as ratio FROM fiat_dao."Collybus_evt_SetParam0" WHERE param = '\x6c69717569646174696f6e526174696f00000000000000000000000000000000' order by vault, evt_block_time desc) as collybus_latest_liquidation_ratio
+on collybus_latest_liquidation_ratio.vault = all_vaults.vault_address
