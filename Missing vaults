@@ -1,0 +1,17 @@
+SELECT
+    codex_evt_init.contract_address
+    , codex_evt_init.vault
+    , COALESCE("tokenId", 0) as tokenId
+    , bytea2numeric(substring(numeric2bytea("tokenId"), 31, 2)) as assetTypeId
+    , CASE bytea2numeric(substring(numeric2bytea("tokenId") from 26 for 1)) 
+        WHEN 1 THEN 'ETH'
+        WHEN 2 THEN 'DAI'
+        WHEN 3 THEN 'USDC'
+        WHEN 4 THEN 'WBTC'
+    END as currency
+, to_timestamp(bytea2numeric(substring(numeric2bytea("tokenId") from 27 for 5))) as maturity
+    
+FROM fiat_dao."Codex_evt_Init" as codex_evt_init
+LEFT JOIN fiat_dao."Collybus_call_setParam0" as vault_tokenId 
+on vault_tokenId.vault = codex_evt_init.vault
+--WHERE codex_evt_init.vault not in (SELECT vault_address FROM dune_user_generated.fiat_collaterals_list)
